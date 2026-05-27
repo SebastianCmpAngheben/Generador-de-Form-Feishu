@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { bitable } from '@lark-base-open/js-sdk';
+import ExcelJS from 'exceljs';
 
 interface GastoRecord {
   userCode: string;
@@ -7,7 +8,7 @@ interface GastoRecord {
   category: string;
   estimateBudget: number;
   amountReleased: number;
-  uuidInvoice: string; // Recibirá el folio generado por tu fórmula de Lark
+  uuidInvoice: string;
   fechaInicio: number | null;
   fechaTermino: number | null;
 }
@@ -30,20 +31,12 @@ export default function App() {
   } | null>(null);
 
   // --- PARSEADORES SEGUROS DE DATOS ---
-  // Modificado para extraer con máxima compatibilidad strings, objetos de fórmula y arreglos de texto de Lark
   const parseTextField = (cellValue: any): string => {
     if (!cellValue) return '';
     if (typeof cellValue === 'string') return cellValue.trim();
-    
-    // Si Lark devuelve la fórmula como un arreglo de segmentos de texto (Común en concatenaciones de fórmulas)
     if (Array.isArray(cellValue)) {
-      return cellValue.map((seg: any) => {
-        if (typeof seg === 'string') return seg;
-        return seg?.text || seg?.value || '';
-      }).join('').trim();
+      return cellValue.map((seg: any) => typeof seg === 'string' ? seg : (seg?.text || seg?.value || '')).join('').trim();
     }
-    
-    // Si viene como un objeto directo con propiedad text o value
     if (typeof cellValue === 'object') {
       if (cellValue.text !== undefined) return String(cellValue.text).trim();
       if (cellValue.value !== undefined) {
@@ -59,7 +52,6 @@ export default function App() {
     if (!cellValue) return 0;
     if (typeof cellValue === 'number') return cellValue;
     if (typeof cellValue === 'string') return parseFloat(cellValue.replace(/[^0-9.-]/g, '')) || 0;
-    
     if (typeof cellValue === 'object') {
       const val = cellValue.value !== undefined ? cellValue.value : (Array.isArray(cellValue) ? cellValue[0] : cellValue.text);
       if (typeof val === 'number') return val;
@@ -116,7 +108,7 @@ export default function App() {
       const idCat = await getFieldIdByNameSafe(table, 'Category of Expense');
       const idBudget = await getFieldIdByNameSafe(table, 'Estimate Budget');
       const idReleased = await getFieldIdByNameSafe(table, 'Ammount Released (Real)');
-      const idInvoice = await getFieldIdByNameSafe(table, 'UUID Invoice'); // Tu columna calculada (fx)
+      const idInvoice = await getFieldIdByNameSafe(table, 'UUID Invoice');
       const idStart = await getFieldIdByNameSafe(table, 'Fecha de Inicio');
       const idEnd = await getFieldIdByNameSafe(table, 'Fecha de Termino');
 
@@ -155,7 +147,6 @@ export default function App() {
             const released = parseNumberField(relVal);
             sumReleased += released;
 
-            // Procesamos el valor usando el parseTextField mejorado para Fórmulas de Texto
             const invVal = idInvoice ? await table.getCellValue(idInvoice, rid) : null;
             const uuidInvoice = parseTextField(invVal);
 
@@ -168,7 +159,7 @@ export default function App() {
               category: parseTextField(await table.getCellValue(idCat!, rid)),
               estimateBudget: budget,
               amountReleased: released,
-              uuidInvoice, // Guardado de manera limpia
+              uuidInvoice,
               fechaInicio: rStart,
               fechaTermino: rEnd
             });
@@ -192,16 +183,206 @@ export default function App() {
     setLoading(false);
   };
 
+  // --- EXPORTACIÓN ESTRUCTURADA CON EXCELJS ---
   useEffect(() => {
-    if (reportData) {
-      const timer = setTimeout(() => { window.print(); setReportData(null); }, 800);
-      return () => clearTimeout(timer);
-    }
+    if (!reportData) return;
+
+    const generateExcel = async () => {
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Comprobación');
+
+      // Configuración de columnas (A hasta G)
+      worksheet.columns = [
+        { key: 'A', width: 5 },   // #
+        { key: 'B', width: 12 },  // FECHA
+        { key: 'C', width: 40 },  // FOLIO FISCAL
+        { key: 'D', width: 25 },  // TIPO DE GASTO
+        { key: 'E', width: 15 },  // MONTO
+        { key: 'F', width: 15 },  // TIPO COMPROBANTE
+        { key: 'G', width: 20 }   // COMENTARIOS
+      ];
+
+      const borderThin = {
+        top: { style: 'thin' as const },
+        left: { style: 'thin' as const },
+        bottom: { style: 'thin' as const },
+        right: { style: 'thin' as const }
+      };
+
+      // 1. NAME AGENCY
+      worksheet.mergeCells('A1:C1');
+      const cellAgency = worksheet.getCell('A1');
+      cellAgency.value = 'NAME AGENCY';
+      cellAgency.font = { name: 'Arial', bold: true, size: 12 };
+
+      // 2. TITULO principal (Barra naranja)
+      worksheet.mergeCells('A3:G3');
+      const cellTitle = worksheet.getCell('A3');
+      cellTitle.value = 'FORMATO DE COMPROBACIÓN';
+      cellTitle.font = { name: 'Arial', bold: true, size: 14, color: { argb: 'FFFFFF' } };
+      cellTitle.alignment = { horizontal: 'center', vertical: 'middle' };
+      cellTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D35400' } };
+
+      // 3. BLOQUE IZQUIERDO (Metadata Usuario)
+      const metaLeft = [
+        ['USUARIO:', reportData.fullName],
+        ['PUESTO:', '-'],
+        ['BUDGET AUTORIZADO:', reportData.totalBudget],
+        ['TOTAL COMPROBADO:', reportData.totalReleased],
+        ['SALDO FINAL:', reportData.totalBudget - reportData.totalReleased],
+        ['DESTINO:', '-']
+      ];
+
+      metaLeft.forEach((row, index) => {
+        const rowIndex = 5 + index;
+        worksheet.mergeCells(`B${rowIndex}:C${rowIndex}`);
+        
+        const labelCell = worksheet.getCell(`A${rowIndex}`);
+        labelCell.value = row[0];
+        labelCell.font = { name: 'Arial', bold: true, size: 9 };
+        labelCell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: row[0] === 'BUDGET AUTORIZADO:' ? 'D4E6F1' : 'EBF5FB' } };
+        labelCell.border = borderThin;
+
+        const valCell = worksheet.getCell(`B${rowIndex}`);
+        valCell.value = row[1];
+        valCell.font = { name: 'Arial', size: 9, bold: typeof row[1] === 'number' };
+        valCell.border = borderThin;
+        worksheet.getCell(`C${rowIndex}`).border = borderThin; // Aplicar borde al merge
+
+        if (typeof row[1] === 'number') {
+          valCell.numFmt = '$#,##0.00';
+          if (row[0] === 'SALDO FINAL:') {
+            valCell.font = { name: 'Arial', bold: true, size: 9, color: { argb: (row[1] < 0) ? 'D32F2F' : '2E7D32' } };
+          }
+        }
+      });
+
+      // 4. BLOQUE DERECHO (Metadata Fechas y Periodo)
+      // Fecha Comprobación
+      worksheet.mergeCells('E5:G5');
+      const cellFComp = worksheet.getCell('E5');
+      cellFComp.value = `FECHA COMPROBACIÓN: ${new Date().toLocaleDateString('es-MX')}`;
+      cellFComp.font = { name: 'Arial', size: 9 };
+      cellFComp.alignment = { horizontal: 'right' };
+      cellFComp.border = borderThin;
+      worksheet.getCell('F5').border = borderThin; worksheet.getCell('G5').border = borderThin;
+
+      // Barra Periodo (Naranja)
+      worksheet.mergeCells('E7:G7');
+      const cellPerTitle = worksheet.getCell('E7');
+      cellPerTitle.value = 'PERIODO DEL VIAJE O GASTO';
+      cellPerTitle.font = { name: 'Arial', bold: true, size: 9, color: { argb: 'FFFFFF' } };
+      cellPerTitle.alignment = { horizontal: 'center' };
+      cellPerTitle.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D35400' } };
+
+      // Fecha Inicio
+      worksheet.getCell('E8').value = 'FECHA INICIO:';
+      worksheet.getCell('E8').font = { name: 'Arial', bold: true, size: 8 };
+      worksheet.getCell('E8').border = borderThin;
+      worksheet.mergeCells('F8:G8');
+      const cellMinD = worksheet.getCell('F8');
+      cellMinD.value = reportData.minDate ? new Date(reportData.minDate).toLocaleDateString('es-MX') : '-';
+      cellMinD.font = { name: 'Arial', size: 9 };
+      cellMinD.border = borderThin; worksheet.getCell('G8').border = borderThin;
+
+      // Fecha Final
+      worksheet.getCell('E9').value = 'FECHA FINAL:';
+      worksheet.getCell('E9').font = { name: 'Arial', bold: true, size: 8 };
+      worksheet.getCell('E9').border = borderThin;
+      worksheet.mergeCells('F9:G9');
+      const cellMaxD = worksheet.getCell('F9');
+      cellMaxD.value = reportData.maxDate ? new Date(reportData.maxDate).toLocaleDateString('es-MX') : '-';
+      cellMaxD.font = { name: 'Arial', size: 9 };
+      cellMaxD.border = borderThin; worksheet.getCell('G9').border = borderThin;
+
+      // Total Días
+      worksheet.mergeCells('E11:G11');
+      const cellDays = worksheet.getCell('E11');
+      cellDays.value = `TOTAL DE DIAS DE VIAJE: ${reportData.totalDays}`;
+      cellDays.font = { name: 'Arial', bold: true, size: 9 };
+      cellDays.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'F2F4F4' } };
+      cellDays.border = borderThin;
+      worksheet.getCell('F11').border = borderThin; worksheet.getCell('G11').border = borderThin;
+
+      // 5. ENCABEZADOS DE LA TABLA PRINCIPAL (Fila 13)
+      const headers = ['#', 'FECHA', 'FOLIO FISCAL / FOLIO DE FACTURA', 'TIPO DE GASTO', 'MONTO', 'TIPO DE COMPROBANTE', 'COMENTARIOS'];
+      headers.forEach((h, idx) => {
+        const cell = worksheet.getCell(13, idx + 1);
+        cell.value = h;
+        cell.font = { name: 'Arial', bold: true, size: 9, color: { argb: 'FFFFFF' } };
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'D35400' } };
+        cell.alignment = { horizontal: 'center', vertical: 'middle', wrapText: true };
+        cell.border = borderThin;
+      });
+
+      // 6. RENDERIZAR LAS FILAS DE DATOS (Fila 14 en adelante)
+      let currentLine = 14;
+      const totalRowsToRender = Math.max(20, reportData.records.length);
+
+      for (let i = 0; i < totalRowsToRender; i++) {
+        const r = reportData.records[i];
+        const rowValues = [
+          i + 1,
+          r ? (r.fechaInicio ? new Date(r.fechaInicio).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit' }) : '-') : '',
+          r ? r.uuidInvoice : '',
+          r ? r.category : '',
+          r ? r.amountReleased : '',
+          r ? (r.uuidInvoice ? 'INTERNO' : '') : '',
+          ''
+        ];
+
+        rowValues.forEach((val, idx) => {
+          const cell = worksheet.getCell(currentLine, idx + 1);
+          cell.value = val;
+          cell.font = { name: 'Arial', size: 9 };
+          cell.border = borderThin;
+
+          // Alineaciones específicas
+          if (idx === 0 || idx === 1 || idx === 5) cell.alignment = { horizontal: 'center' };
+          if (idx === 4 && r) { 
+            cell.alignment = { horizontal: 'right' }; 
+            cell.numFmt = '$#,##0.00'; 
+          }
+
+          // Alternancia de color en filas
+          if (currentLine % 2 === 0) {
+            cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FBFAF9' } };
+          }
+        });
+        currentLine++;
+      }
+
+      // 7. FIRMA DE CONFORMIDAD
+      currentLine += 2;
+      worksheet.mergeCells(`B${currentLine}:E${currentLine}`);
+      const cellLineFirma = worksheet.getCell(`B${currentLine}`);
+      cellLineFirma.value = '_____________________________________';
+      cellLineFirma.alignment = { horizontal: 'center' };
+
+      currentLine++;
+      worksheet.mergeCells(`B${currentLine}:E${currentLine}`);
+      const cellFirmaText = worksheet.getCell(`B${currentLine}`);
+      cellFirmaText.value = `Firma de Conformidad: ${reportData.fullName}`;
+      cellFirmaText.font = { name: 'Arial', bold: true, size: 10 };
+      cellFirmaText.alignment = { horizontal: 'center' };
+
+      // DESCARGA DEL ARCHIVO .XLSX
+      const buffer = await workbook.xlsx.writeBuffer();
+      const blob = new Blob([buffer], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = `Comprobacion_${reportData.fullName.replace(/\s+/g, '_')}.xlsx`;
+      link.click();
+
+      setReportData(null);
+    };
+
+    generateExcel();
   }, [reportData]);
 
   return (
     <div style={{ padding: '15px', fontFamily: 'Arial, sans-serif' }}>
-      <div className="no-print">
+      <div>
         <h3>Generador de Formato Agency</h3>
         <form onSubmit={handleGenerateReport} style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
           <select value={selectedUser} onChange={e => setSelectedUser(e.target.value)} required style={{ padding: '8px' }}>
@@ -211,129 +392,10 @@ export default function App() {
           <input type="date" value={fechaInicioFiltro} onChange={e => setFechaInicioFiltro(e.target.value)} />
           <input type="date" value={fechaTerminoFiltro} onChange={e => setFechaTerminoFiltro(e.target.value)} />
           <button type="submit" disabled={loading} style={{ padding: '10px', background: '#3370ff', color: '#fff', border: 'none', cursor: 'pointer' }}>
-            {loading ? 'Generando...' : 'Descargar Formato'}
+            {loading ? 'Generando...' : 'Descargar Formato Excel'}
           </button>
         </form>
       </div>
-
-      {reportData && (
-        <div className="print-only container-form">
-          {/* HEADER NAME AGENCY */}
-          <div className="agency-header">
-            <span className="agency-name">NAME AGENCY</span>
-          </div>
-
-          {/* TITULO */}
-          <div className="title-bar">
-            FORMATO DE COMPROBACIÓN
-          </div>
-
-          {/* META DATA GRID */}
-          <div className="meta-grid">
-            <div className="meta-left">
-              <div className="row"><label>USUARIO:</label><span>{reportData.fullName}</span></div>
-              <div className="row"><label>PUESTO:</label><span>-</span></div>
-              <div className="row highlight-row"><label>BUDGET AUTORIZADO:</label><span>$ {reportData.totalBudget.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span></div>
-              <div className="row"><label>TOTAL COMPROBADO:</label><span style={{ fontWeight: 'bold' }}>$ {reportData.totalReleased.toLocaleString('en-US', { minimumFractionDigits: 2 })}</span></div>
-              <div className="row"><label>SALDO FINAL:</label><span style={{ fontWeight: 'bold', color: (reportData.totalBudget - reportData.totalReleased) < 0 ? '#d32f2f' : '#2e7d32' }}>$ {(reportData.totalBudget - reportData.totalReleased).toLocaleString('en-US', { minimumFractionDigits: 2 })}</span></div>
-              <div className="row"><label>DESTINO:</label><span>-</span></div>
-            </div>
-            <div className="meta-right">
-              <div className="date-box">FECHA COMPROBACIÓN: <strong>{new Date().toLocaleDateString('es-MX')}</strong></div>
-              <div className="period-box">
-                <div className="period-title">PERIODO DEL VIAJE O GASTO</div>
-                <div className="row"><label>FECHA INICIO:</label><span>{reportData.minDate ? new Date(reportData.minDate).toLocaleDateString('es-MX') : '-'}</span></div>
-                <div className="row"><label>FECHA FINAL:</label><span>{reportData.maxDate ? new Date(reportData.maxDate).toLocaleDateString('es-MX') : '-'}</span></div>
-              </div>
-              <div className="days-box">TOTAL DE DIAS DE VIAJE: <strong>{reportData.totalDays}</strong></div>
-            </div>
-          </div>
-
-          {/* MAIN TABLE */}
-          <table className="main-table">
-            <thead>
-              <tr>
-                <th style={{ width: '4%' }}>#</th>
-                <th style={{ width: '10%' }}>FECHA</th>
-                <th style={{ width: '36%' }}>FOLIO FISCAL / FOLIO DE FACTURA</th>
-                <th style={{ width: '18%' }}>TIPO DE GASTO</th>
-                <th style={{ width: '12%' }}>MONTO</th>
-                <th style={{ width: '10%' }}>TIPO DE COMPROBANTE</th>
-                <th style={{ width: '10%' }}>COMENTARIOS</th>
-              </tr>
-            </thead>
-            <tbody>
-              {reportData.records.map((r, i) => (
-                <tr key={i}>
-                  <td style={{ textAlign: 'center' }}>{i + 1}</td>
-                  <td style={{ textAlign: 'center' }}>{r.fechaInicio ? new Date(r.fechaInicio).toLocaleDateString('es-MX', { day: '2-digit', month: '2-digit' }) : '-'}</td>
-                  {/* Aquí se imprime el folio de la fórmula de manera limpia */}
-                  <td style={{ fontSize: '8.5px', paddingLeft: '5px', color: '#333', letterSpacing: '0.2px' }}>{r.uuidInvoice}</td>
-                  <td>{r.category}</td>
-                  <td style={{ textAlign: 'right', paddingRight: '6px' }}>$ {r.amountReleased.toFixed(2)}</td>
-                  <td style={{ textAlign: 'center', fontSize: '8.5px' }}>{r.uuidInvoice ? 'INTERNO' : ''}</td>
-                  <td></td>
-                </tr>
-              ))}
-              {Array.from({ length: Math.max(0, 20 - reportData.records.length) }).map((_, i) => (
-                <tr key={i + reportData.records.length}>
-                  <td style={{ textAlign: 'center' }}>{i + reportData.records.length + 1}</td>
-                  <td></td><td></td><td></td><td></td><td></td><td></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {/* FOOTER */}
-          <div className="footer-signature">
-            <div className="signature-box">
-               <p style={{ margin: '0 0 2px 0' }}>_____________________________________</p>
-               <p style={{ margin: 0 }}><strong>Firma de Conformidad: {reportData.fullName}</strong></p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <style>{`
-        @media screen { .print-only { display: none; } }
-        @media print {
-          @page { size: portrait; margin: 8mm 6mm; }
-          body * { visibility: hidden; }
-          .print-only, .print-only * { visibility: visible; }
-          .print-only { position: absolute; left: 0; top: 0; width: 100%; }
-          .no-print { display: none !important; }
-        }
-        
-        .container-form { font-family: 'Segoe UI', Arial, sans-serif; border: 1.5px solid #000; padding: 12px; background-color: #fff; box-sizing: border-box; }
-        .agency-header { text-align: left; margin-bottom: 4px; }
-        .agency-name { font-weight: bold; font-size: 13px; border-bottom: 1px solid #000; padding-right: 40px; color: #333; }
-        
-        .title-bar { background-color: #D35400; color: white; text-align: center; font-weight: bold; padding: 6px; font-size: 16px; border: 1px solid #000; margin-bottom: 8px; letter-spacing: 0.5px; }
-        
-        .meta-grid { display: flex; justify-content: space-between; margin-bottom: 8px; gap: 10px; }
-        .meta-left { width: 55%; border: 1px solid #000; }
-        .meta-right { width: 43%; display: flex; flex-direction: column; gap: 4px; }
-        
-        .row { display: flex; border-bottom: 1px solid #000; align-items: center; min-height: 20px; }
-        .row:last-child { border-bottom: none; }
-        .row label { width: 150px; background-color: #EBF5FB; font-size: 10px; padding: 3px 5px; font-weight: bold; border-right: 1px solid #000; display: flex; align-items: center; min-height: 20px; box-sizing: border-box; }
-        .row span { padding-left: 8px; font-size: 10px; flex: 1; color: #111; }
-        .highlight-row label { background-color: #D4E6F1; }
-        .highlight-row span { font-weight: bold; color: #1B4F72; }
-
-        .date-box, .days-box { border: 1px solid #000; padding: 3px 6px; font-size: 10px; background-color: #F2F4F4; box-sizing: border-box; }
-        .period-box { border: 1px solid #000; }
-        .period-title { background-color: #D35400; color: white; text-align: center; font-size: 9px; font-weight: bold; padding: 2px; }
-        .period-box .row label { width: 100px; }
-
-        .main-table { width: 100%; border-collapse: collapse; border: 1px solid #000; margin-top: 4px; table-layout: fixed; }
-        .main-table th { background-color: #D35400; color: white; border: 1px solid #000; font-size: 9px; padding: 5px 2px; text-align: center; font-weight: bold; word-wrap: break-word; }
-        .main-table td { border: 1px solid #000; height: 19px; font-size: 9px; padding: 1px 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .main-table tbody tr:nth-of-type(even) { background-color: #FBFAF9; }
-        
-        .footer-signature { margin-top: 15px; display: flex; justify-content: flex-start; padding-left: 10px; }
-        .signature-box { text-align: center; font-size: 11px; color: #222; }
-      `}</style>
     </div>
   );
 }
